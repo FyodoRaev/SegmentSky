@@ -2,60 +2,136 @@ import torch
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from mpmath.tests.extratest_gamma import testcases
 import os
 import glob
-import random
+import json
+from datetime import datetime
+
 # Правильные импорты для SAM2
 from sam2.build_sam import build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
 
-def show_mask(mask, ax, random_color=False):
-    """Отображает маску на изображении."""
-    if random_color:
-        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+def save_segment_info(segment_data, save_path):
+    """Сохраняет информацию о сегменте в JSON файл"""
+    # Конвертируем numpy arrays в списки для JSON
+    segment_info = {
+        'area': int(segment_data['area']),
+        'bbox': segment_data['bbox'],
+        'predicted_iou': float(segment_data['predicted_iou']),
+        'point_coords': segment_data['point_coords'],
+        'stability_score': float(segment_data['stability_score']),
+        'crop_box': segment_data['crop_box']
+    }
+
+    with open(save_path, 'w') as f:
+        json.dump(segment_info, f, indent=2)
+
+
+def save_segment_mask(mask, save_path):
+    """Сохраняет маску сегмента как изображение"""
+    # Конвертируем boolean маску в uint8
+    mask_uint8 = (mask * 255).astype(np.uint8)
+    cv2.imwrite(save_path, mask_uint8)
+
+
+def extract_segment_crop(image, mask, bbox, padding=10):
+    """Извлекает область изображения, соответствующую сегменту"""
+    x, y, w, h = bbox
+
+    # Добавляем отступы
+    x1 = max(0, int(x - padding))
+    y1 = max(0, int(y - padding))
+    x2 = min(image.shape[1], int(x + w + padding))
+    y2 = min(image.shape[0], int(y + h + padding))
+
+    # Извлекаем область
+    crop = image[y1:y2, x1:x2]
+    crop_mask = mask[y1:y2, x1:x2]
+
+    # Применяем маску (делаем фон прозрачным/черным)
+    if len(crop.shape) == 3:
+        # Создаем RGBA изображение
+        crop_rgba = np.zeros((crop.shape[0], crop.shape[1], 4), dtype=np.uint8)
+        crop_rgba[:, :, :3] = crop
+        crop_rgba[:, :, 3] = crop_mask * 255  # Альфа канал
+        return crop_rgba
     else:
-        color = np.array([30 / 255, 144 / 255, 255 / 255, 0.6])  # Голубой цвет для неба
-    h, w = mask.shape[-2:]
-    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    ax.imshow(mask_image)
+        return crop * crop_mask
+
+
+def visualize_all_segments(image, segments, max_display=20):
+    """Создает визуализацию всех найденных сегментов"""
+    fig, axes = plt.subplots(4, 5, figsize=(20, 16))
+    axes = axes.flatten()
+
+    # Показываем оригинальное изображение
+    axes[0].imshow(image)
+    axes[0].set_title('Оригинал')
+    axes[0].axis('off')
+
+    # Показываем первые max_display-1 сегментов
+    for i in range(min(len(segments), max_display - 1)):
+        segment = segments[i]
+        mask = segment['segmentation']
+
+        # Создаем цветную маску
+        colored_mask = np.zeros((*mask.shape, 3))
+        color = np.random.rand(3)
+        colored_mask[mask] = color
+
+        axes[i + 1].imshow(image)
+        axes[i + 1].imshow(colored_mask, alpha=0.6)
+        axes[i + 1].set_title(f'Сегмент {i + 1}\nПлощадь: {segment["area"]}')
+        axes[i + 1].axis('off')
+
+    # Скрываем неиспользуемые subplot'ы
+    for i in range(len(segments) + 1, len(axes)):
+        axes[i].axis('off')
+
+    plt.tight_layout()
+    return fig
 
 
 def main():
-    print("Запуск теста сегментации неба с SAM 2...")
+    print("Запуск извлечения всех сегментов с SAM 2...")
 
-    # --- 1. Настройка ---
+    # --- 1. Настройка модели ---
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        print("Используется GPU (CUDA).")
-    else:
-        print("Используется CPU. Это может быть медленно.")
-
-    # Правильные пути для SAM2
-    config_file = "configs/sam2.1/sam2.1_hiera_t.yaml"  # Конфигурационный файл
-    checkpoint_path = "./sam2/checkpoints/sam2.1_hiera_tiny.pt"
+    print(f"Используется устройство: {device}")
 
     # Загрузка модели SAM2
+    config_file = "configs/sam2.1/sam2.1_hiera_t.yaml"
+    checkpoint_path = "./sam2/checkpoints/sam2.1_hiera_tiny.pt"
+
     print("Загрузка модели SAM2...")
     try:
         model = build_sam2(config_file, checkpoint_path, device=device)
-        predictor = SAM2ImagePredictor(model)
+
+        # Создаем автоматический генератор масок
+        mask_generator = SAM2AutomaticMaskGenerator(
+            model=model,
+            points_per_side=32,  # Количество точек на сторону для сетки
+            pred_iou_thresh=0.7,  # Порог IoU для фильтрации
+            stability_score_thresh=0.8,  # Порог стабильности
+            crop_n_layers=1,  # Количество слоев обрезки
+            crop_n_points_downscale_factor=2,  # Фактор уменьшения точек
+            min_mask_region_area=500,  # Минимальная площадь сегмента
+        )
         print("Модель успешно загружена.")
     except Exception as e:
         print(f"Ошибка загрузки модели: {e}")
-        print("Убедитесь, что пути к конфигурации и чекпоинту правильные.")
         return
 
-    # --- 2. Загрузка и обработка изображения ---
-    import os
-    import glob
+    # --- 2. Настройка папок ---
+    test_folder = "fold_for_test_cases"
+    segments_folder = "extracted_segments"
 
-    test_folder = "fold_for_test_cases"  # папка с тестовыми изображениями
+    # Создаем основную папку для сегментов
+    os.makedirs(segments_folder, exist_ok=True)
 
+    # Поиск изображений
     image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
-
-    # Получаем список всех изображений в папке
     image_paths = []
     for extension in image_extensions:
         image_paths.extend(glob.glob(os.path.join(test_folder, extension)))
@@ -63,169 +139,117 @@ def main():
 
     if not image_paths:
         print(f"Ошибка: в папке '{test_folder}' не найдено изображений.")
-        print("Убедитесь, что папка существует и содержит изображения в форматах: jpg, jpeg, png, bmp, tiff")
         return
 
-    test_cases = len(image_paths)
-    print(f"Найдено {test_cases} изображений для обработки")
+    print(f"Найдено {len(image_paths)} изображений для обработки")
 
-    # Создаем папку для результатов, если её нет
-    results_folder = "results"
-    os.makedirs(results_folder, exist_ok=True)
+    # --- 3. Обработка каждого изображения ---
+    num_runs = 1  # Количество запусков для каждого изображения
 
-    # Параметры для улучшенного алгоритма
-    num_attempts = 5  # Количество попыток поиска неба
-    sky_region_height_ratio = 0.3  # Верхние 30% изображения для поиска неба
+    for img_idx, image_path in enumerate(image_paths):
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        print(f"\n--- Обработка изображения {img_idx + 1}/{len(image_paths)}: {base_name} ---")
 
-    def calculate_mask_area(mask):
-        """Вычисляет площадь маски (количество пикселей)"""
-        return np.sum(mask)
-
-    def generate_sky_points(width, height, num_points, sky_height_ratio=0.3):
-        """Генерирует случайные точки в верхней части изображения"""
-        sky_height = int(height * sky_height_ratio)
-        points = []
-
-        for _ in range(num_points):
-            x = random.randint(width // 4, 3 * width // 4)  # Избегаем краев
-            y = random.randint(10, sky_height)  # Верхняя часть изображения
-            points.append([x, y])
-
-        return np.array(points)
-
-    for i, image_path in enumerate(image_paths):
-        print(f"\n--- Обработка изображения {i + 1}/{test_cases}: {os.path.basename(image_path)} ---")
-
+        # Загрузка изображения
         try:
             image_bgr = cv2.imread(image_path)
             if image_bgr is None:
                 raise ValueError("Изображение не найдено")
-            # OpenCV читает в BGR, а модель ожидает RGB
             image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             print(f"Изображение загружено: {image_rgb.shape}")
         except Exception as e:
-            print(f"Ошибка: не удалось загрузить изображение '{image_path}'.")
-            print(e)
-            continue  # Переходим к следующему изображению вместо завершения программы
-
-        # Устанавливаем изображение для предиктора
-        print("Подготовка изображения для модели...")
-        predictor.set_image(image_rgb)
-        height, width, _ = image_rgb.shape
-
-        # Генерируем случайные точки в верхней части изображения
-        candidate_points = generate_sky_points(width, height, num_attempts, sky_region_height_ratio)
-
-        best_mask = None
-        best_score = 0
-        best_area = 0
-        best_point = None
-        all_attempts = []
-
-        print(f"Выполняем {num_attempts} попыток поиска неба...")
-
-        for attempt, point in enumerate(candidate_points):
-            try:
-                # Создаем промпт для текущей точки
-                input_point = np.array([point])
-                input_label = np.array([1])
-
-                # Получаем маску для текущей точки
-                masks, scores, logits = predictor.predict(
-                    point_coords=input_point,
-                    point_labels=input_label,
-                    multimask_output=False,
-                )
-
-                mask = masks[0]
-                score = scores[0]
-                area = calculate_mask_area(mask)
-
-                # Сохраняем информацию о попытке
-                attempt_info = {
-                    'point': point,
-                    'mask': mask,
-                    'score': score,
-                    'area': area,
-                    'attempt': attempt + 1
-                }
-                all_attempts.append(attempt_info)
-
-                print(f"  Попытка {attempt + 1}: точка {point}, площадь={area}, score={score:.3f}")
-
-                # Проверяем, лучше ли эта маска
-                if area > best_area:
-                    best_mask = mask
-                    best_score = score
-                    best_area = area
-                    best_point = point
-                    print(f"    ↑ Новая лучшая маска! Площадь: {area}")
-
-            except Exception as e:
-                print(f"  Ошибка в попытке {attempt + 1}: {e}")
-                continue
-
-        if best_mask is None:
-            print("Не удалось получить ни одной маски для этого изображения")
+            print(f"Ошибка загрузки {image_path}: {e}")
             continue
 
-        print(f"\nЛучший результат: точка {best_point}, площадь={best_area}, score={best_score:.3f}")
+        # Создаем папку для этого изображения
+        image_segments_folder = os.path.join(segments_folder, base_name)
+        os.makedirs(image_segments_folder, exist_ok=True)
 
-        # --- 4. Визуализация лучшего результата ---
-        plt.figure(figsize=(15, 10))
+        all_segments = []  # Собираем все сегменты со всех запусков
 
-        # Основное изображение с лучшей маской
-        plt.subplot(1, 2, 1)
-        plt.imshow(image_rgb)
-        show_mask(best_mask, plt.gca())
+        # Запускаем сегментацию несколько раз
+        for run_idx in range(num_runs):
+            print(f"  Запуск {run_idx + 1}/{num_runs}...")
 
-        # Отображаем все попытки разными цветами
-        colors = ['red', 'blue', 'green', 'orange', 'purple']
-        for j, attempt in enumerate(all_attempts):
-            color = colors[j % len(colors)]
-            alpha = 1.0 if attempt['point'][0] == best_point[0] and attempt['point'][1] == best_point[1] else 0.5
-            size = 300 if attempt['point'][0] == best_point[0] and attempt['point'][1] == best_point[1] else 150
-            plt.scatter(attempt['point'][0], attempt['point'][1],
-                        color=color, marker='*', s=size,
-                        edgecolor='white', linewidth=2, alpha=alpha,
-                        label=f"Попытка {attempt['attempt']}: {attempt['area']}")
+            try:
+                # Генерируем маски
+                segments = mask_generator.generate(image_rgb)
+                print(f"    Найдено {len(segments)} сегментов")
 
-        plt.title(f"Лучшая сегментация неба\nПлощадь: {best_area}, Score: {best_score:.2f}", fontsize=14)
-        plt.axis('off')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                # Создаем папку для этого запуска
+                run_folder = os.path.join(image_segments_folder, f"run_{run_idx + 1}")
+                os.makedirs(run_folder, exist_ok=True)
 
-        # Дополнительная визуализация - сравнение всех попыток
-        plt.subplot(1, 2, 2)
-        areas = [attempt['area'] for attempt in all_attempts]
-        scores = [attempt['score'] for attempt in all_attempts]
-        attempts_nums = [attempt['attempt'] for attempt in all_attempts]
+                # Сохраняем каждый сегмент
+                for seg_idx, segment in enumerate(segments):
+                    segment_folder = os.path.join(run_folder, f"segment_{seg_idx:03d}")
+                    os.makedirs(segment_folder, exist_ok=True)
 
-        plt.bar(attempts_nums, areas, alpha=0.7, color='skyblue', label='Площадь маски')
-        plt.xlabel('Номер попытки')
-        plt.ylabel('Площадь маски (пиксели)')
-        plt.title('Сравнение площадей масок\nпо попыткам')
-        plt.grid(True, alpha=0.3)
+                    # Сохраняем маску
+                    mask_path = os.path.join(segment_folder, "mask.png")
+                    save_segment_mask(segment['segmentation'], mask_path)
 
-        # Выделяем лучший результат
-        best_attempt_num = next(attempt['attempt'] for attempt in all_attempts
-                                if attempt['area'] == best_area)
-        plt.bar(best_attempt_num, best_area, color='gold', label='Лучший результат')
-        plt.legend()
+                    # Сохраняем информацию о сегменте
+                    info_path = os.path.join(segment_folder, "info.json")
+                    save_segment_info(segment, info_path)
 
-        # Получаем имя файла без расширения для результата
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        plt.suptitle(f"Анализ сегментации неба: {base_name}", fontsize=16)
+                    # Извлекаем и сохраняем область сегмента
+                    crop = extract_segment_crop(image_rgb, segment['segmentation'], segment['bbox'])
+                    crop_path = os.path.join(segment_folder, "crop.png")
+                    if crop.shape[2] == 4:  # RGBA
+                        # Конвертируем в BGR для OpenCV
+                        crop_bgr = cv2.cvtColor(crop, cv2.COLOR_RGBA2BGRA)
+                        cv2.imwrite(crop_path, crop_bgr)
+                    else:
+                        crop_bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(crop_path, crop_bgr)
 
-        # Сохраняем результат
-        result_filename = os.path.join(results_folder, f"sky_segmentation_{base_name}.png")
-        plt.savefig(result_filename, dpi=150, bbox_inches='tight')
-        print(f"Результат сохранен в '{result_filename}'")
+                # Добавляем сегменты к общему списку
+                for segment in segments:
+                    segment['run'] = run_idx + 1
+                all_segments.extend(segments)
 
-        # Показываем результат
-        plt.show()
-        plt.close()
+                # Создаем визуализацию для этого запуска
+                if len(segments) > 0:
+                    fig = visualize_all_segments(image_rgb, segments)
+                    viz_path = os.path.join(run_folder, "visualization.png")
+                    fig.savefig(viz_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig)
 
-    print(f"\nОбработка завершена! Результаты сохранены в папке '{results_folder}'")
+            except Exception as e:
+                print(f"    Ошибка в запуске {run_idx + 1}: {e}")
+                continue
+
+        # Сохраняем сводную информацию
+        summary = {
+            'image_name': base_name,
+            'image_shape': image_rgb.shape,
+            'total_runs': num_runs,
+            'total_segments': len(all_segments),
+            'segments_per_run': [len([s for s in all_segments if s['run'] == i]) for i in range(1, num_runs + 1)],
+            'processing_date': datetime.now().isoformat()
+        }
+
+        summary_path = os.path.join(image_segments_folder, "summary.json")
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+
+        print(f"  Всего извлечено {len(all_segments)} сегментов")
+        print(f"  Результаты сохранены в: {image_segments_folder}")
+
+    print(f"\nИзвлечение сегментов завершено!")
+    print(f"Все результаты сохранены в папке: {segments_folder}")
+    print("\nСтруктура папок:")
+    print("extracted_segments/")
+    print("  ├── image1/")
+    print("  │   ├── run_1/")
+    print("  │   │   ├── segment_001/")
+    print("  │   │   │   ├── mask.png")
+    print("  │   │   │   ├── crop.png")
+    print("  │   │   │   └── info.json")
+    print("  │   │   └── visualization.png")
+    print("  │   ├── run_2/")
+    print("  │   └── summary.json")
 
 
 if __name__ == "__main__":
