@@ -31,7 +31,7 @@ def load_models(dino_weights_path, sam_checkpoint_path, device):
     return model, predictor
 
 
-def get_sky_prompts(model, image_path, device, dino_image_size=224):
+def get_sky_prompts(model, image_path, device, dino_image_size=500):
     image_bgr = cv2.imread(image_path)
     if image_bgr is None:
         raise FileNotFoundError(f"Не удалось прочитать изображение: {image_path}")

@@ -71,7 +71,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=3, help="Количество эпох обучения")
     parser.add_argument("--batch_size", type=int, default=8, help="Размер батча")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Скорость обучения")
-    parser.add_argument("--image_size", type=int, default=224, help="Размер изображения для обучения")
+    parser.add_argument("--image_size", type=int, default=500, help="Размер изображения для обучения")
     parser.add_argument("--output_dir", type=str, default="../checkpoints", help="Директория для сохранения весов")
     parser.add_argument("--cache_dir", type=str, default="../data", help="Директория для кэша датасета")
 

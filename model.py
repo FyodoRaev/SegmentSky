@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from transformers import Dinov2Model, Dinov2PreTrainedModel
 from transformers.modeling_outputs import SemanticSegmenterOutput
 from scipy.ndimage import distance_transform_edt
-
+import numpy as np
 
 class SimpleSegmentationHead(nn.Module):
     def __init__(self, in_channels, num_labels, dropout_prob=0.1):
@@ -34,28 +34,30 @@ class Dinov2ForSkySegmentation(Dinov2PreTrainedModel):
         with torch.no_grad():
             outputs = self.dinov2(pixel_values,
                                   output_hidden_states=False,
-                                  output_attentions=False)
+                                  output_attentions=False)  # тут можно трайнуть поменять вот эти штуки
         patch_embeddings = outputs.last_hidden_state[:, 1:, :]
         logits = self.classifier(patch_embeddings)
         logits = nn.functional.interpolate(
-            logits, size=pixel_values.shape[2:], mode="bilinear", align_corners=False
+            logits, size=pixel_values.shape[2:], mode="bilinear", align_corners=False # тут можно трайнуть поменять выравнение_углов, кажется для нашей задачи логично
         )
 
         loss = None
         if labels is not None:
             # Prepare distance-based weights to penalize predictions near true boundaries
             labels_np = labels.cpu().numpy()
-            weight_list = []
+
+            # Создаем numpy массив нужного размера заранее
+            weight_array = np.zeros((labels_np.shape[0], labels_np.shape[2], labels_np.shape[3]), dtype=np.float32)
+
             for i in range(labels_np.shape[0]):
                 # distance to nearest background for sky pixels
                 dist = distance_transform_edt(labels_np[i, 0])
                 # inverse distance weight, add 1 to avoid div by zero
-                w = 1.0 / (dist + 1.0)**1.3
-                weight_list.append(w)
-            # Stack and convert to tensor
-            weight_tensor = torch.tensor(
-                weight_list, device=labels.device, dtype=logits.dtype
-            ).unsqueeze(1)
+                weight_array[i] = 1.0 / (dist + 1.0) ** 1.3
+
+            # Конвертируем в тензор одним вызовом
+            weight_tensor = torch.from_numpy(weight_array).to(device=labels.device, dtype=logits.dtype).unsqueeze(1)
+
             # Compute weighted BCE loss
             loss = F.binary_cross_entropy_with_logits(
                 logits, labels.float(), weight=weight_tensor
