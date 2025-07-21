@@ -11,5 +11,5 @@
 ![Alt text](my_sky.jpg)
   
 
+![Alt text](output.png)
 
-![[output.png]]
