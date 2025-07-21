@@ -10,4 +10,6 @@
 
   
 ![[my_sky.jpg]]
+
+
 ![[output.png]]
