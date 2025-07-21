@@ -9,6 +9,5 @@
 
 
   
-[my_sky.jpg]
-
-[output.png]
+![[my_sky.jpg]]
+![[output.png]]
