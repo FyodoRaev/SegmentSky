@@ -249,7 +249,7 @@ def generate_automatic_sky_masks_with_onnx(chunk=None):
         prob = np.array(prob_img).astype(np.float32) / 255.0
 
         # Threshold and simple morphology (dilate then erode) to clean edges
-        mask = (prob >= float(SKYSEG_PROB_THRESHOLD)).astype(np.uint8) * 255
+        mask = (prob <= float(SKYSEG_PROB_THRESHOLD)).astype(np.uint8) * 255
         kernel = np.ones((3, 3), np.uint8)
         mask = cv.dilate(mask, kernel, iterations=3)
         mask = cv.erode(mask, kernel, iterations=3)
