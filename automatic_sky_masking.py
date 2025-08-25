@@ -6,13 +6,13 @@
 # How to install (Linux):
 #
 # 1. Add this script to auto-launch - https://agisoft.freshdesk.com/support/solutions/articles/31000133123-how-to-run-python-script-automatically-on-metashape-professional-start
-#    copy sky_masking.py script to /home/<username>/.local/share/Agisoft/Metashape Pro/scripts/
+#    copy automatic_sky_masking.py script to /home/<username>/.local/share/Agisoft/Metashape Pro/scripts/
 # 2. Restart Metashape
 #
 # How to install (Windows):
 #
 # 1. Add this script to auto-launch - https://agisoft.freshdesk.com/support/solutions/articles/31000133123-how-to-run-python-script-automatically-on-metashape-professional-start
-#    copy sky_masking.py script to C:/Users/<username>/AppData/Local/Agisoft/Metashape Pro/scripts/
+#    copy automatic_sky_masking.py script to C:/Users/<username>/AppData/Local/Agisoft/Metashape Pro/scripts/
 # 2. Restart Metashape
 
 import pathlib
@@ -65,12 +65,10 @@ def generate_automatic_sky_masks_with_onnx(chunk=None):
 
         # Ensure model is present (next to script if possible, otherwise user data dir)
         def _get_models_dir():
-            # 1) если скрипт загружен как модуль — кладём рядом
             try:
                 return pathlib.Path(__file__).parent
             except NameError:
                 pass
-            # 2) иначе — используем каталог данных Metashape
             try:
                 from PySide2 import QtCore
                 data_root = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DataLocation)
@@ -78,12 +76,11 @@ def generate_automatic_sky_masks_with_onnx(chunk=None):
                 d.mkdir(parents=True, exist_ok=True)
                 return d
             except Exception:
-                # 3) последний запасной вариант — в домашний
                 d = pathlib.Path.home() / ".metashape_models"
                 d.mkdir(parents=True, exist_ok=True)
                 return d
 
-        # URL на HuggingFace должен быть "resolve", а не "blob" (на всякий случай чиним)
+        # URL on HuggingFace must be "resolve", not "blob"
         SKYSEG_ONNX_URL = SKYSEG_ONNX_URL_GLOBAL.replace("/blob/", "/resolve/")
 
         models_dir = _get_models_dir()
@@ -98,7 +95,7 @@ def generate_automatic_sky_masks_with_onnx(chunk=None):
             except Exception as e:
                 print(f"Failed to download model: {e}", file=sys.stderr)
                 raise
-            # быстрая проверка, что не HTML
+            # test that it is not HTML
             if model_path.stat().st_size < 1024:
                 raise RuntimeError(f"Downloaded file too small: {model_path} — check URL")
             print(f"Model downloaded to {model_path}")
